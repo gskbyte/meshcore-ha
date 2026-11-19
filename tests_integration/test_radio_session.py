@@ -468,3 +468,58 @@ async def test_unload_releases_the_runtime_without_leaking_tasks(
     assert runtime.radio.transport_closed
     assert node_task.cancelled()
     runtime.radio.assert_no_leaked_tasks()
+
+
+async def test_ble_connects_through_bleak_retry_connector(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """BLE goes through establish_connection: it retries and habluetooth stays quiet."""
+    from bleak.exc import BleakError
+    from habluetooth import BaseHaRemoteScanner, BluetoothManager, HaBluetoothConnector, set_manager
+    from habluetooth.usage import install_multiple_bleak_catcher, uninstall_multiple_bleak_catcher
+
+    attempts = []
+
+    class FakeBackend:
+        """Bleak backend that fails once, then answers appstart and set_time."""
+
+        def __init__(self, device: Any, disconnected_callback: Any = None, **_: Any) -> None:
+            self.address, self.is_connected, self._on_drop = device.address, False, disconnected_callback
+            self.services = SimpleNamespace(get_service=bool, get_characteristic=bool)
+
+        async def connect(self, *_: Any, **__: Any) -> None:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise BleakError("le-connection-abort-by-local")
+            self.is_connected = True
+
+        async def disconnect(self) -> None:
+            self.is_connected = False
+
+        async def start_notify(self, _char: Any, callback: Any, **_: Any) -> None:
+            self._rx = callback
+
+        async def write_gatt_char(self, _char: Any, data: bytes, response: bool = True) -> None:
+            # appstart (0x01) -> SELF_INFO named "Hub"; anything else -> OK
+            self._rx(bytearray(b"\x05" + b"\x00" * 57 + b"Hub" if data[0] == 1 else b"\x00"))
+
+    manager = BluetoothManager()
+    set_manager(manager)
+    install_multiple_bleak_catcher()
+    connector = HaBluetoothConnector(FakeBackend, "proxy", lambda: True)
+    scanner = BaseHaRemoteScanner("proxy", "proxy", connector, True)
+    unregister = manager.async_register_scanner(scanner, connection_slots=2)
+    scanner._async_on_advertisement(
+        "D4:05:92:55:06:F5", -50, "MeshCore-Hub", [], {}, {}, None, {}, time.monotonic()
+    )
+    try:
+        session = RadioSession(hass, "ble", ble_address="d4:05:92:55:06:f5")
+        assert await session.start() is True
+        assert session.node_name == "Hub"
+        await session.close()
+    finally:
+        unregister()
+        uninstall_multiple_bleak_catcher()
+
+    assert len(attempts) == 2
+    assert "without bleak-retry-connector" not in caplog.text

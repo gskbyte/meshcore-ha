@@ -1,6 +1,7 @@
 {
   "domain": "meshcore",
   "name": "MeshCore",
+  "after_dependencies": ["bluetooth"],
   "codeowners": ["@awolden"],
   "config_flow": true,
   "dependencies": ["logbook", "http"],

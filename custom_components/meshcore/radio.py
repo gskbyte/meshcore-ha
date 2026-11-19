@@ -14,10 +14,13 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final
 
+import bleak
+import bleak_retry_connector
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from meshcore import MeshCore
+from meshcore.ble_cx import UART_RX_CHAR_UUID, UART_SERVICE_UUID, UART_TX_CHAR_UUID, BLEConnection
 from meshcore.events import Event, EventType, Subscription
 
 from .const import (
@@ -61,6 +64,44 @@ class _TrackedMeshCore(MeshCore):
         built = _BUILT.get()
         if built is not None:
             built.append(self)
+
+
+class _RetryBLEConnection(BLEConnection):
+    """BLE transport that connects through bleak_retry_connector.
+
+    The SDK calls BleakClient.connect() directly, which Home Assistant's
+    Bluetooth wrapper warns about and which skips retries, backoff and
+    connection-slot handling.
+    """
+
+    async def connect(self) -> str | None:
+        """Connect by MAC address via establish_connection; scan by name as before."""
+        if not self.address or ":" not in self.address:
+            return await super().connect()
+        await self._cleanup_stale_client()
+        # Inside Home Assistant this is its scanner wrapper, which resolves the
+        # address from the Bluetooth manager instead of starting a new scan.
+        device = await bleak.BleakScanner.find_device_by_address(self.address.upper())
+        if device is None:
+            _LOGGER.warning("BLE device %s not found", self.address)
+            return None
+        self.client = await bleak_retry_connector.establish_connection(
+            bleak_retry_connector.BleakClientWithServiceCache,  # looked up late: HA patches it
+            device,
+            device.name or device.address,
+            disconnected_callback=self.handle_disconnect,
+        )
+        try:
+            if self.pin is not None:
+                await self.client.pair()
+            await self.client.start_notify(UART_TX_CHAR_UUID, self.handle_rx)
+            self.rx_char = self.client.services.get_characteristic(UART_RX_CHAR_UUID)
+            if self.client.services.get_service(UART_SERVICE_UUID) is None or not self.rx_char:
+                raise RuntimeError("MeshCore UART service not found")
+        except BaseException:
+            await self.client.disconnect()
+            raise
+        return self.client.address
 
 
 class RadioUnavailable(RuntimeError):
@@ -493,11 +534,7 @@ class RadioSession(MeshCommands):
             )
         if self.connection_type == CONNECTION_TYPE_BLE:
             _LOGGER.info("Using BLE connection with address %s", self.ble_address)
-            return _TrackedMeshCore.create_ble(
-                self.ble_address if self.ble_address else "",
-                debug=False,
-                auto_reconnect=False,
-            )
+            return self._create_ble()
         if self.connection_type == CONNECTION_TYPE_TCP and self.tcp_host:
             _LOGGER.info("Using TCP connection to %s:%s", self.tcp_host, self.tcp_port)
             return _TrackedMeshCore.create_tcp(
@@ -507,6 +544,18 @@ class RadioSession(MeshCommands):
                 auto_reconnect=False,
             )
         return None
+
+    async def _create_ble(self) -> MeshCore | None:
+        """MeshCore.create_ble, but on the retrying BLE transport."""
+        mesh_core = _TrackedMeshCore(
+            _RetryBLEConnection(address=self.ble_address or ""),
+            debug=False,
+            auto_reconnect=False,
+        )
+        if await mesh_core.connect() is None:
+            await mesh_core.disconnect()
+            return None
+        return mesh_core
 
     async def _validate(self, mesh_core: MeshCore) -> bool:
         """Run the appstart handshake and cache the identity it reports."""
