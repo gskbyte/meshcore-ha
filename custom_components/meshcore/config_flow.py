@@ -4,9 +4,9 @@ import copy
 import logging
 from typing import Any
 
+import bleak
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-from bleak import BleakScanner
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import AbortFlow, FlowResult
@@ -36,6 +36,7 @@ from .const import (
     CONF_AUTO_CLEANUP_STALE_NEIGHBORS,
     CONF_BAUDRATE,
     CONF_BLE_ADDRESS,
+    CONF_BLE_PIN,
     CONF_CLI_CONSOLE_ENABLED,
     CONF_CLIENT_DISABLE_PATH_RESET,
     CONF_CLIENT_NAME,
@@ -125,6 +126,7 @@ USB_SCHEMA = vol.Schema(
 BLE_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_BLE_ADDRESS): str,
+        vol.Optional(CONF_BLE_PIN, default=""): str,
         vol.Optional(CONF_SELF_TELEMETRY_ENABLED, default=False): cv.boolean,
         vol.Optional(CONF_SELF_TELEMETRY_INTERVAL, default=DEFAULT_SELF_TELEMETRY_INTERVAL): vol.All(cv.positive_int, vol.Range(min=60, max=3600))
     }
@@ -180,10 +182,10 @@ def _traffic_policy_selector(current: str) -> SelectSelector:
 
 async def validate_common(api: RadioSession) -> dict[str, Any]:
     """Validate the user input allows us to connect to the USB device."""
-    try: 
+    try:
         # Try to connect with timeout
         connect_success = await asyncio.wait_for(api.connect(), timeout=CONNECTION_TIMEOUT)
-        
+
         # Check if connection was successful
         if not connect_success or not api.connected:
             _LOGGER.error("Failed to connect to device - connect() returned False")
@@ -191,22 +193,19 @@ async def validate_common(api: RadioSession) -> dict[str, Any]:
 
         # Get node info to verify communication
         node_info = await api.exchange("send_appstart")
-        
+
         # Validate we got meaningful info back
         if node_info.type == EventType.ERROR:
             _LOGGER.error("Failed to get node info - received error: %s", node_info.payload)
             raise CannotConnect("Failed to get node info")
-            
-        # Disconnect when done
-        await api.disconnect()
-        
+
         # Extract and log the device information
-        device_name = node_info.payload.get('name', 'Unknown')
-        public_key = node_info.payload.get('public_key', '')
-        
+        device_name = node_info.payload.get("name", "Unknown")
+        public_key = node_info.payload.get("public_key", "")
+
         # Log the values we're extracting
         _LOGGER.info(f"Validating device - Name: {device_name}, Public Key: {public_key[:10]}")
-        
+
         # If we get here, the connection was successful and we got valid info
         return {"title": f"MeshCore Node {device_name}", "name": device_name, "pubkey": public_key}
     except TimeoutError as ex:
@@ -214,6 +213,9 @@ async def validate_common(api: RadioSession) -> dict[str, Any]:
     except Exception as ex:
         _LOGGER.error("Validation error: %s", ex)
         raise CannotConnect(f"Failed to connect: {str(ex)}") from ex
+    finally:
+        await api.disconnect()
+
 
 async def validate_usb_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
     """Validate the user input allows us to connect to the USB device."""
@@ -232,7 +234,8 @@ async def validate_ble_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[
         hass=hass,
         connection_type=CONNECTION_TYPE_BLE,
         ble_address=data[CONF_BLE_ADDRESS],
-    ) 
+        ble_pin=(data.get(CONF_BLE_PIN) or "").strip() or None,
+    )
     return await validate_common(api)
 
 
@@ -287,7 +290,14 @@ class MeshCoreConfigFlow(config_entries.ConfigFlow, domain=DOMAIN): # type: igno
         entry = self._get_reconfigure_entry()
         new_data = dict(entry.data)
         # Remove old connection-specific keys
-        for key in (CONF_USB_PATH, CONF_BAUDRATE, CONF_BLE_ADDRESS, CONF_TCP_HOST, CONF_TCP_PORT):
+        for key in (
+            CONF_USB_PATH,
+            CONF_BAUDRATE,
+            CONF_BLE_ADDRESS,
+            CONF_BLE_PIN,
+            CONF_TCP_HOST,
+            CONF_TCP_PORT,
+        ):
             new_data.pop(key, None)
         new_data.update(connection_data)
         new_data[CONF_NAME] = info.get("name", new_data.get(CONF_NAME))
@@ -343,10 +353,13 @@ class MeshCoreConfigFlow(config_entries.ConfigFlow, domain=DOMAIN): # type: igno
         if user_input is not None:
             try:
                 info = await validate_ble_input(self.hass, user_input)
-                return await self._reconfigure_save({
+                connection: dict[str, Any] = {
                     CONF_CONNECTION_TYPE: CONNECTION_TYPE_BLE,
                     CONF_BLE_ADDRESS: user_input[CONF_BLE_ADDRESS],
-                }, info)
+                }
+                if pin := (user_input.get(CONF_BLE_PIN) or "").strip():
+                    connection[CONF_BLE_PIN] = pin
+                return await self._reconfigure_save(connection, info)
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except Exception:
@@ -354,9 +367,10 @@ class MeshCoreConfigFlow(config_entries.ConfigFlow, domain=DOMAIN): # type: igno
                 errors["base"] = "unknown"
 
         current_addr = entry.data.get(CONF_BLE_ADDRESS, "")
+        current_pin = str(entry.data.get(CONF_BLE_PIN, "") or "")
         devices = {}
         try:
-            scanner = BleakScanner()
+            scanner = bleak.BleakScanner()
             discovered_devices = await scanner.discover(timeout=5.0)
             for device in discovered_devices:
                 if device.name and "MeshCore" in device.name:
@@ -364,10 +378,15 @@ class MeshCoreConfigFlow(config_entries.ConfigFlow, domain=DOMAIN): # type: igno
         except Exception as ex:
             _LOGGER.warning("Failed to scan for BLE devices: %s", ex)
 
+        pin_field = vol.Optional(
+            CONF_BLE_PIN, description={"suggested_value": current_pin}, default=""
+        )
         if devices:
-            schema = vol.Schema({vol.Required(CONF_BLE_ADDRESS): vol.In(devices)})
+            schema = vol.Schema({vol.Required(CONF_BLE_ADDRESS): vol.In(devices), pin_field: str})
         else:
-            schema = vol.Schema({vol.Required(CONF_BLE_ADDRESS, default=current_addr): str})
+            schema = vol.Schema(
+                {vol.Required(CONF_BLE_ADDRESS, default=current_addr): str, pin_field: str}
+            )
 
         return self.async_show_form(
             step_id="reconfigure_ble", data_schema=schema, errors=errors,
@@ -510,11 +529,14 @@ class MeshCoreConfigFlow(config_entries.ConfigFlow, domain=DOMAIN): # type: igno
         if user_input is not None:
             try:
                 info = await validate_ble_input(self.hass, user_input)
+                connection: dict[str, Any] = {
+                    CONF_CONNECTION_TYPE: CONNECTION_TYPE_BLE,
+                    CONF_BLE_ADDRESS: user_input[CONF_BLE_ADDRESS],
+                }
+                if pin := (user_input.get(CONF_BLE_PIN) or "").strip():
+                    connection[CONF_BLE_PIN] = pin
                 return await self._async_create_node_entry(
-                    {
-                        CONF_CONNECTION_TYPE: CONNECTION_TYPE_BLE,
-                        CONF_BLE_ADDRESS: user_input[CONF_BLE_ADDRESS],
-                    },
+                    connection,
                     user_input,
                     info,
                 )
@@ -530,7 +552,7 @@ class MeshCoreConfigFlow(config_entries.ConfigFlow, domain=DOMAIN): # type: igno
         # Scan for BLE devices
         devices = {}
         try:
-            scanner = BleakScanner()
+            scanner = bleak.BleakScanner()
             discovered_devices = await scanner.discover(timeout=5.0)
             for device in discovered_devices:
                 if device.name and "MeshCore" in device.name:
@@ -543,6 +565,7 @@ class MeshCoreConfigFlow(config_entries.ConfigFlow, domain=DOMAIN): # type: igno
             schema = vol.Schema(
                 {
                     vol.Required(CONF_BLE_ADDRESS): vol.In(devices),
+                    vol.Optional(CONF_BLE_PIN, default=""): str,
                     vol.Optional(CONF_SELF_TELEMETRY_ENABLED, default=False): cv.boolean,
                     vol.Optional(CONF_SELF_TELEMETRY_INTERVAL, default=DEFAULT_SELF_TELEMETRY_INTERVAL): vol.All(cv.positive_int, vol.Range(min=60, max=3600)),
                     vol.Optional(CONF_SELF_DIAGNOSTICS_ENABLED, default=False): cv.boolean,
@@ -554,6 +577,7 @@ class MeshCoreConfigFlow(config_entries.ConfigFlow, domain=DOMAIN): # type: igno
             # Otherwise, allow manual entry, but with simplified schema
             schema = vol.Schema({
                 vol.Required(CONF_BLE_ADDRESS): str,
+                vol.Optional(CONF_BLE_PIN, default=""): str,
                 vol.Optional(CONF_SELF_TELEMETRY_ENABLED, default=False): cv.boolean,
                 vol.Optional(CONF_SELF_TELEMETRY_INTERVAL, default=DEFAULT_SELF_TELEMETRY_INTERVAL): vol.All(cv.positive_int, vol.Range(min=60, max=3600)),
                 vol.Optional(CONF_SELF_DIAGNOSTICS_ENABLED, default=False): cv.boolean,

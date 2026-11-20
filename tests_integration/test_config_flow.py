@@ -11,9 +11,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 
 from custom_components.meshcore.const import (
+    CONF_BLE_ADDRESS,
+    CONF_BLE_PIN,
     CONF_CONNECTION_TYPE,
     CONF_TCP_HOST,
     CONF_TCP_PORT,
+    CONNECTION_TYPE_BLE,
     CONNECTION_TYPE_TCP,
     DOMAIN,
 )
@@ -85,3 +88,37 @@ async def test_user_flow_cannot_connect(
 
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "cannot_connect"}
+
+
+async def test_user_flow_ble_stores_pin(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant
+) -> None:
+    """User picks BLE, enters an optional pairing PIN, and it is saved on the entry."""
+    with patch("custom_components.meshcore.config_flow.bleak.BleakScanner") as scanner_cls:
+        scanner_cls.return_value.discover.side_effect = RuntimeError("no scanner")
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_CONNECTION_TYPE: CONNECTION_TYPE_BLE}
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "ble"
+
+    with patch(
+        "custom_components.meshcore.config_flow.validate_ble_input",
+        return_value={"title": "MeshCore BLE", "name": "MeshCore BLE", "pubkey": "cafebabe0123"},
+    ) as validate_mock, patch(
+        "custom_components.meshcore.async_setup_entry", return_value=True
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {CONF_BLE_ADDRESS: "D4:05:92:55:06:F5", CONF_BLE_PIN: "123456"},
+        )
+        await hass.async_block_till_done()
+
+    validate_mock.assert_awaited_once()
+    assert validate_mock.await_args.args[1][CONF_BLE_PIN] == "123456"
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_BLE_ADDRESS] == "D4:05:92:55:06:F5"
+    assert result["data"][CONF_BLE_PIN] == "123456"

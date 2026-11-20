@@ -45,6 +45,7 @@
       "ble": {
         "data": {
           "ble_address": "Bluetooth Device",
+          "ble_pin": "Bluetooth PIN (optional)",
           "self_telemetry_enabled": "Enable Self Telemetry",
           "self_telemetry_interval": "Self Telemetry Interval (seconds)",
           "self_diagnostics_enabled": "Enable Self Diagnostics",
@@ -52,6 +53,7 @@
           "contact_discovery_mode": "Contact Discovery Mode"
         },
         "data_description": {
+          "ble_pin": "Pairing PIN if required by your MeshCore BLE companion firmware (for example 123456). Leave blank if already paired or if PIN pairing is disabled.",
           "self_diagnostics_enabled": "Creates 14 diagnostic sensors for the companion: uptime, TX queue length, noise floor, last RSSI and SNR, TX and RX airtime, and packet counters. Off by default. These are local queries to the companion and send nothing on the mesh. The interval sets how often the sensors update (60 to 3600 seconds).",
           "contact_discovery_mode": "Entity per contact: every discovered contact gets its own entity (best for small meshes). Data only: discovered contacts are tracked as data only with no per-contact entity -- inspect them via the dropdown or the Get Discovered Contact service. Disabled: contact discovery is turned off entirely and any existing discovered contacts are cleared."
         },
@@ -92,7 +94,11 @@
       },
       "reconfigure_ble": {
         "data": {
-          "ble_address": "Bluetooth Device"
+          "ble_address": "Bluetooth Device",
+          "ble_pin": "Bluetooth PIN (optional)"
+        },
+        "data_description": {
+          "ble_pin": "Pairing PIN if required by your MeshCore BLE companion firmware (for example 123456). Leave blank if already paired or if PIN pairing is disabled."
         },
         "description": "Update Bluetooth connection settings",
         "title": "Reconfigure Bluetooth Connection"

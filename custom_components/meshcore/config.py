@@ -21,6 +21,7 @@ from .const import (
     CONF_AUTO_CLEANUP_STALE_NEIGHBORS,
     CONF_BAUDRATE,
     CONF_BLE_ADDRESS,
+    CONF_BLE_PIN,
     CONF_CLI_CONSOLE_ENABLED,
     CONF_CLIENT_DISABLE_PATH_RESET,
     CONF_CLIENT_UPDATE_INTERVAL,
@@ -356,6 +357,7 @@ class Connection:
     usb_path: Any = None
     baudrate: Any = None
     ble_address: Any = None
+    ble_pin: Any = None
     tcp_host: Any = None
     tcp_port: Any = None
 
@@ -369,6 +371,7 @@ class Connection:
             usb_path=data.get(CONF_USB_PATH),
             baudrate=data.get(CONF_BAUDRATE),
             ble_address=data.get(CONF_BLE_ADDRESS),
+            ble_pin=data.get(CONF_BLE_PIN),
             tcp_host=data.get(CONF_TCP_HOST),
             tcp_port=data.get(CONF_TCP_PORT),
         )

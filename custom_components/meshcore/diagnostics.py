@@ -26,7 +26,7 @@ from .traffic import iso_timestamp
 
 # Key names that carry credentials or personal data. Any key containing one of
 # these words is removed, except the few below that only name a setting.
-_SECRET_WORDS = ("password", "secret", "token", "key", "username", "email")
+_SECRET_WORDS = ("password", "secret", "token", "key", "username", "email", "ble_pin")
 _KEEP_KEYS = frozenset({"pubkey_prefix", "use_auth_token", "mqtt_token_ttl_seconds"})
 
 

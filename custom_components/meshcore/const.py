@@ -9,6 +9,7 @@ DOMAIN: Final = "meshcore"
 CONF_CONNECTION_TYPE: Final = "connection_type"
 CONF_USB_PATH: Final = "usb_path"
 CONF_BLE_ADDRESS: Final = "ble_address"
+CONF_BLE_PIN: Final = "ble_pin"
 CONF_TCP_HOST: Final = "tcp_host"
 CONF_TCP_PORT: Final = "tcp_port"
 CONF_BAUDRATE: Final = "baudrate"
@@ -206,7 +207,7 @@ DEFAULT_UPDATE_TICK: Final = 5  # base polling interval
 REPAIR_PUBKEY_CHANGED: Final = "pubkey_changed"
 
 # Other constants
-CONNECTION_TIMEOUT: Final = 10  # seconds
+CONNECTION_TIMEOUT: Final = 30  # seconds
 
 # Rate limiter settings
 RATE_LIMITER_CAPACITY: Final = 20

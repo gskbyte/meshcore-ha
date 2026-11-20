@@ -483,12 +483,15 @@ async def test_ble_connects_through_bleak_retry_connector(
     class FakeBackend:
         """Bleak backend that fails once, then answers appstart and set_time."""
 
-        def __init__(self, device: Any, disconnected_callback: Any = None, **_: Any) -> None:
-            self.address, self.is_connected, self._on_drop = device.address, False, disconnected_callback
+        def __init__(
+            self, device: Any, disconnected_callback: Any = None, pair: bool = False, **_: Any
+        ) -> None:
+            self.address, self.is_connected = device.address, False
+            self._on_drop, self._pair = disconnected_callback, pair
             self.services = SimpleNamespace(get_service=bool, get_characteristic=bool)
 
-        async def connect(self, *_: Any, **__: Any) -> None:
-            attempts.append(1)
+        async def connect(self, pair: bool = False, *_: Any, **__: Any) -> None:
+            attempts.append(pair or self._pair)
             if len(attempts) == 1:
                 raise BleakError("le-connection-abort-by-local")
             self.is_connected = True
@@ -513,7 +516,7 @@ async def test_ble_connects_through_bleak_retry_connector(
         "D4:05:92:55:06:F5", -50, "MeshCore-Hub", [], {}, {}, None, {}, time.monotonic()
     )
     try:
-        session = RadioSession(hass, "ble", ble_address="d4:05:92:55:06:f5")
+        session = RadioSession(hass, "ble", ble_address="d4:05:92:55:06:f5", ble_pin="123456")
         assert await session.start() is True
         assert session.node_name == "Hub"
         await session.close()
@@ -521,5 +524,5 @@ async def test_ble_connects_through_bleak_retry_connector(
         unregister()
         uninstall_multiple_bleak_catcher()
 
-    assert len(attempts) == 2
+    assert attempts == [True, True]
     assert "without bleak-retry-connector" not in caplog.text

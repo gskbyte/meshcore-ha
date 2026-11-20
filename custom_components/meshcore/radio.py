@@ -66,6 +66,94 @@ class _TrackedMeshCore(MeshCore):
             built.append(self)
 
 
+@contextlib.asynccontextmanager
+async def _bluez_pin_agent(pin: str | None) -> AsyncIterator[None]:
+    """Register a temporary BlueZ pairing agent on Linux to supply a BLE PIN."""
+    cleaned = (pin or "").strip()
+    if not cleaned:
+        yield
+        return
+    try:
+        from dbus_fast import BusType, Message, MessageType
+        from dbus_fast.aio import MessageBus
+
+        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+    except Exception:
+        yield
+        return
+
+    agent_path = f"/org/bluez/meshcore_{id(bus):x}"
+
+    def _handle(msg: Message) -> Message | None:
+        if (
+            msg.message_type is not MessageType.METHOD_CALL
+            or msg.path != agent_path
+            or msg.interface != "org.bluez.Agent1"
+        ):
+            return None
+        if msg.member == "RequestPasskey" and cleaned.isdigit():
+            _LOGGER.info("Supplying BLE passkey to BlueZ pairing agent")
+            return Message.new_method_return(msg, "u", [int(cleaned)])
+        if msg.member == "RequestPinCode":
+            _LOGGER.info("Supplying BLE PIN code to BlueZ pairing agent")
+            return Message.new_method_return(msg, "s", [cleaned])
+        if msg.member in (
+            "Release",
+            "DisplayPasskey",
+            "DisplayPinCode",
+            "RequestConfirmation",
+            "RequestAuthorization",
+            "AuthorizeService",
+            "Cancel",
+        ):
+            return Message.new_method_return(msg, "", [])
+        return None
+
+    bus.add_message_handler(_handle)
+    registered = False
+    try:
+        with contextlib.suppress(Exception):
+            reply = await bus.call(
+                Message(
+                    destination="org.bluez",
+                    path="/org/bluez",
+                    interface="org.bluez.AgentManager1",
+                    member="RegisterAgent",
+                    signature="os",
+                    body=[agent_path, "KeyboardOnly"],
+                )
+            )
+            if reply.message_type is not MessageType.ERROR:
+                registered = True
+                await bus.call(
+                    Message(
+                        destination="org.bluez",
+                        path="/org/bluez",
+                        interface="org.bluez.AgentManager1",
+                        member="RequestDefaultAgent",
+                        signature="o",
+                        body=[agent_path],
+                    )
+                )
+            else:
+                _LOGGER.debug("BlueZ RegisterAgent declined: %s", reply.body)
+        yield
+    finally:
+        if registered:
+            with contextlib.suppress(Exception):
+                await bus.call(
+                    Message(
+                        destination="org.bluez",
+                        path="/org/bluez",
+                        interface="org.bluez.AgentManager1",
+                        member="UnregisterAgent",
+                        signature="o",
+                        body=[agent_path],
+                    )
+                )
+        bus.disconnect()
+
+
 class _RetryBLEConnection(BLEConnection):
     """BLE transport that connects through bleak_retry_connector.
 
@@ -90,10 +178,9 @@ class _RetryBLEConnection(BLEConnection):
             device,
             device.name or device.address,
             disconnected_callback=self.handle_disconnect,
+            pair=bool((self.pin or "").strip()),
         )
         try:
-            if self.pin is not None:
-                await self.client.pair()
             await self.client.start_notify(UART_TX_CHAR_UUID, self.handle_rx)
             self.rx_char = self.client.services.get_characteristic(UART_RX_CHAR_UUID)
             if self.client.services.get_service(UART_SERVICE_UUID) is None or not self.rx_char:
@@ -133,6 +220,7 @@ class RadioSession(MeshCommands):
         usb_path: str | None = None,
         baudrate: int = DEFAULT_BAUDRATE,
         ble_address: str | None = None,
+        ble_pin: str | None = None,
         tcp_host: str | None = None,
         tcp_port: int = DEFAULT_TCP_PORT,
         entry: ConfigEntry | None = None,
@@ -148,6 +236,7 @@ class RadioSession(MeshCommands):
         self.usb_path = usb_path
         self.baudrate = baudrate
         self.ble_address = ble_address
+        self.ble_pin = ble_pin
         self.tcp_host = tcp_host
         self.tcp_port = tcp_port
         self.self_info: dict[str, Any] = {}
@@ -547,14 +636,16 @@ class RadioSession(MeshCommands):
 
     async def _create_ble(self) -> MeshCore | None:
         """MeshCore.create_ble, but on the retrying BLE transport."""
+        pin = (self.ble_pin or "").strip() or None
         mesh_core = _TrackedMeshCore(
-            _RetryBLEConnection(address=self.ble_address or ""),
+            _RetryBLEConnection(address=self.ble_address or "", pin=pin),
             debug=False,
             auto_reconnect=False,
         )
-        if await mesh_core.connect() is None:
-            await mesh_core.disconnect()
-            return None
+        async with _bluez_pin_agent(pin):
+            if await mesh_core.connect() is None:
+                await mesh_core.disconnect()
+                return None
         return mesh_core
 
     async def _validate(self, mesh_core: MeshCore) -> bool:
